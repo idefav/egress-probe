@@ -152,7 +152,7 @@ func (s *Server) dns(b []byte, remote, local string, tcp bool) []byte {
 		}
 	} else {
 		static := name == zone
-		for _, prefix := range []string{"api.", "http.", "h3.", "tcp.", "tls.", "udp.", "stun.", "ns."} {
+		for _, prefix := range []string{"api.", "control.", "http.", "h3.", "tcp.", "tls.", "udp.", "stun.", "ns."} {
 			static = static || name == prefix+zone
 		}
 		// QNAME-minimizing resolvers must not receive an NXDOMAIN cut for

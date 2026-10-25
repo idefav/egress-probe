@@ -10,6 +10,9 @@ ExecStart=/usr/local/bin/egress-probe-server -config /etc/egress-probe/config.js
 Restart=on-failure
 RestartSec=5
 StateDirectory=egress-probe
+StateDirectoryMode=0700
+LogRateLimitIntervalSec=60s
+LogRateLimitBurst=100
 UMask=0077
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
@@ -17,7 +20,8 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-RestrictAddressFamilies=AF_INET AF_UNIX
+# ICE needs netlink to enumerate local interfaces/routes; no NET_ADMIN capability.
+RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
 LimitNOFILE=4096
 
 [Install]

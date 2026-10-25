@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -25,10 +26,14 @@ func main() {
 	}
 }
 func run() error {
+	if len(os.Args) > 1 && (os.Args[1] == "pairing" || os.Args[1] == "devices") {
+		return adminCommand(os.Args[1:])
+	}
 	init := flag.Bool("init", false, "Generate new private config and public profile; never overwrite")
 	config := flag.String("config", "/etc/egress-probe/config.json", "Private configuration file")
 	domain := flag.String("domain", "", "Delegated test domain for init")
 	ip := flag.String("ipv4", "", "Public IPv4 for init")
+	listenIP := flag.String("listen-ip", "", "Local IPv4 interface for init (default: all IPv4 interfaces)")
 	verify := flag.String("verify-report", "", "Verify historical report signatures (requires -profile)")
 	profileFile := flag.String("profile", "", "Separately trusted public profile.json")
 	flag.Parse()
@@ -59,6 +64,9 @@ func run() error {
 		return nil
 	}
 	if *init {
+		if *listenIP != "" && net.ParseIP(*listenIP).To4() == nil {
+			return fmt.Errorf("-listen-ip must be a local IPv4 address")
+		}
 		key, e := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if e != nil {
 			return e
@@ -68,13 +76,12 @@ func run() error {
 			return e
 		}
 		id := observer.RandomID()
-		api := observer.RandomID() + observer.RandomID()
 		p := server.Profile(*domain, *ip, id)
-		s, e := server.New(p, key, api)
+		s, e := server.New(p, key, "")
 		if e != nil {
 			return e
 		}
-		cfg := server.Config{Domain: *domain, IPv4: *ip, ServerID: id, APIKey: api, PrivateKey: observer.Encoding.EncodeToString(der), CacheDir: "/var/lib/egress-probe"}
+		cfg := server.Config{Domain: *domain, IPv4: *ip, ServerID: id, PrivateKey: observer.Encoding.EncodeToString(der), CacheDir: "/var/lib/egress-probe", ListenIP: *listenIP}
 		if e = os.MkdirAll(filepath.Dir(*config), 0700); e != nil {
 			return e
 		}
@@ -126,5 +133,5 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return s.Serve(ctx, cfg.CacheDir)
+	return s.ServeOn(ctx, cfg.CacheDir, cfg.ListenIP)
 }

@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WebRTC · v2rayN</title>
+<style>body{font:17px system-ui;max-width:760px;margin:8vh auto;padding:24px;color:#19324b;background:#f5f7fa}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:white;padding:20px;border-radius:12px}button{padding:12px 24px}</style>
+<h1>WebRTC 出口检查 / Egress check</h1>
+<p>真实浏览器 ICE → DTLS → SCTP 双向数据通道。不请求摄像头或麦克风。<br>Real browser data channel; no camera or microphone access.</p>
+<p>候选地址由浏览器报告；实际出口由独立服务器签名。IPv6 数据传输及 TURN 未覆盖。<br>Candidate addresses are browser claims; the selected IPv4 egress is signed. IPv6 transport and TURN are not tested.</p>
+<button id="cancel">取消 / Cancel</button><pre id="status">等待检查 / Waiting</pre>
+<script src="/webrtc.js"></script></html>

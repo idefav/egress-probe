@@ -7,8 +7,11 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net"
 	"net/http"
@@ -31,13 +34,44 @@ func fixture(t *testing.T) *Server {
 	if e != nil {
 		t.Fatal(e)
 	}
+	s.Auth, e = OpenAuth(t.TempDir(), s.Profile)
+	if e != nil {
+		t.Fatal(e)
+	}
+	code, e := s.Auth.CreatePairing(10 * time.Minute)
+	if e != nil {
+		t.Fatal(e)
+	}
+	data, _ := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(code, "EP1."))
+	var pairing PairingCode
+	_ = json.Unmarshal(data, &pairing)
+	clientKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	csr, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, clientKey)
+	_, _, e = s.Auth.Redeem(pairing.ID, pairing.Secret, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csr})), "fixture")
+	if e != nil {
+		t.Fatal(e)
+	}
 	return s
 }
 func control(s *Server, method, path, body string, tlsEnabled bool, auth string) *httptest.ResponseRecorder {
-	r := httptest.NewRequest(method, "https://api.check.example.net"+path, strings.NewReader(body))
+	if strings.HasPrefix(path, "/v1/") && path != "/v1/echo" {
+		path = "/v2/" + strings.TrimPrefix(path, "/v1/")
+	}
+	r := httptest.NewRequest(method, "https://control.check.example.net"+path, strings.NewReader(body))
 	r.RemoteAddr = "198.51.100.11:54321"
 	if tlsEnabled {
-		r.TLS = &tls.ConnectionState{}
+		r.TLS = &tls.ConnectionState{ServerName: "control.check.example.net"}
+		if auth == "Bearer "+s.apiKey {
+			for _, d := range s.Auth.state.Devices {
+				for _, stored := range d.Certificates {
+					cert, _ := parseCert(stored.PEM)
+					r.TLS.PeerCertificates = []*x509.Certificate{cert}
+					r.TLS.VerifiedChains = [][]*x509.Certificate{{cert, s.Auth.ca}}
+					break
+				}
+				break
+			}
+		}
 	} else {
 		r.TLS = nil
 	}

@@ -25,14 +25,16 @@ type Config struct {
 	Domain     string `json:"domain"`
 	IPv4       string `json:"ipv4"`
 	ServerID   string `json:"serverId"`
-	APIKey     string `json:"apiKey"`
+	APIKey     string `json:"apiKey,omitempty"` // Deprecated: loaded for migration only; never grants access.
 	PrivateKey string `json:"privateKey"`
 	CacheDir   string `json:"cacheDir"`
+	ListenIP   string `json:"listenIP,omitempty"`
 }
 
 type quicPeerKey struct{}
 
 type session struct {
+	DeviceID string
 	Expires  time.Time
 	Tickets  map[string]observer.Ticket
 	Receipts map[string][]observer.Receipt
@@ -48,14 +50,16 @@ type Server struct {
 	window    time.Time
 	requests  int
 	slots     chan struct{}
+	rtc       rtcService
+	Auth      *Auth
 }
 
 func New(profile observer.Profile, key *ecdsa.PrivateKey, apiKey string) (*Server, error) {
 	if key == nil || key.Curve != elliptic.P256() {
 		return nil, errors.New("require P-256 signing key")
 	}
-	if len(apiKey) < 32 || net.ParseIP(profile.IPv4).To4() == nil || profile.ServerID == "" || !validDomain(profile.Domain) {
-		return nil, errors.New("require API key >=32 characters, IPv4, server ID and DNS domain")
+	if net.ParseIP(profile.IPv4).To4() == nil || profile.ServerID == "" || !validDomain(profile.Domain) {
+		return nil, errors.New("require IPv4, server ID and DNS domain")
 	}
 	profile.Version = observer.Version
 	profile.PublicKey = observer.PublicKey(&key.PublicKey)
@@ -110,8 +114,13 @@ func (s *Server) cleanLocked() {
 func (s *Server) ticket(id, nonce string) (observer.Ticket, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.ticketLocked(id, nonce)
+}
+
+// Caller holds s.mu so validation and the following state update are atomic.
+func (s *Server) ticketLocked(id, nonce string) (observer.Ticket, bool) {
 	sess := s.sessions[s.issued[id]]
-	if sess == nil {
+	if sess == nil || s.Auth == nil || !s.Auth.Active(sess.DeviceID) {
 		return observer.Ticket{}, false
 	}
 	t, ok := sess.Tickets[id]
@@ -135,7 +144,7 @@ func (s *Server) observe(t observer.Ticket, protocol, remote, local, query, qtyp
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess := s.sessions[t.SessionID]
-	if sess == nil || time.Now().After(t.Expires) {
+	if _, valid := s.ticketLocked(t.ID, t.Nonce); !valid || sess == nil {
 		return r, errors.New("expired session")
 	}
 	if len(sess.Receipts[t.ID]) >= 8 {
@@ -161,25 +170,57 @@ func (s *Server) Handler() http.Handler {
 			s.echo(w, r)
 			return
 		}
-		// Control credentials are never accepted on cleartext HTTP.
-		if r.TLS == nil || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.apiKey)) != 1 {
-			http.Error(w, "unauthorized", 401)
+		if r.URL.Path == "/webrtc" || r.URL.Path == "/webrtc.js" || strings.HasPrefix(r.URL.Path, "/v1/webrtc/") {
+			s.webRTC(w, r)
 			return
 		}
+		if s.authEndpoint(w, r) {
+			return
+		}
+		if !strings.HasPrefix(r.URL.Path, "/v2/") {
+			http.Error(w, "Upgrade client and pair this device; API key authentication is disabled", http.StatusUpgradeRequired)
+			return
+		}
+		if !s.controlRequest(r) {
+			http.Error(w, "control host required", 401)
+			return
+		}
+		deviceID, err := s.Auth.Authenticate(r)
+		if err != nil {
+			http.Error(w, "device certificate required, expired or revoked", 401)
+			return
+		}
+		if !s.Auth.Allow("device:"+deviceID, 600) {
+			http.Error(w, "device rate limit", 429)
+			return
+		}
+		if s.deviceEndpoint(w, r, deviceID) {
+			return
+		}
+		// Reuse the existing protocol dispatcher only after v2 device authentication.
+		r = r.Clone(r.Context())
+		urlCopy := *r.URL
+		urlCopy.Path = "/v1/" + strings.TrimPrefix(r.URL.Path, "/v2/")
+		r.URL = &urlCopy
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		// Re-check after acquiring the session lock: revocation may have raced authentication.
+		if !s.Auth.Active(deviceID) {
+			http.Error(w, "device revoked", 401)
+			return
+		}
 		s.cleanLocked()
 		if r.URL.Path == "/v1/capabilities" && r.Method == "GET" {
 			writeJSON(w, struct {
 				Profile   observer.Profile `json:"profile"`
 				Protocols []string         `json:"protocols"`
-			}{s.Profile, []string{"tcp", "tls", "http", "https", "h3", "udp", "stun", "dns-udp", "dns-tcp", "dns-system"}})
+			}{s.Profile, []string{"tcp", "tls", "http", "https", "h3", "udp", "stun", "dns-udp", "dns-tcp", "dns-system", "webrtc"}})
 			return
 		}
 		if r.URL.Path == "/v1/sessions" && r.Method == "POST" {
 			active := 0
 			for _, v := range s.sessions {
-				if time.Now().Before(v.Expires) {
+				if v.DeviceID == deviceID && time.Now().Before(v.Expires) {
 					active++
 				}
 			}
@@ -188,7 +229,7 @@ func (s *Server) Handler() http.Handler {
 				return
 			}
 			id := observer.RandomID()
-			s.sessions[id] = &session{time.Now().Add(10 * time.Minute), map[string]observer.Ticket{}, map[string][]observer.Receipt{}}
+			s.sessions[id] = &session{deviceID, time.Now().Add(10 * time.Minute), map[string]observer.Ticket{}, map[string][]observer.Receipt{}}
 			writeJSON(w, map[string]any{"id": id, "expires": s.sessions[id].Expires})
 			return
 		}
@@ -198,13 +239,14 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		sess := s.sessions[parts[2]]
-		if sess == nil {
+		if sess == nil || sess.DeviceID != deviceID {
 			http.NotFound(w, r)
 			return
 		}
 		if len(parts) == 3 && r.Method == "DELETE" {
 			for id := range sess.Tickets {
 				delete(s.issued, id)
+				s.rtc.remove(id)
 			}
 			delete(s.sessions, parts[2])
 			w.WriteHeader(204)
@@ -224,7 +266,7 @@ func (s *Server) Handler() http.Handler {
 				return
 			}
 			switch in.Kind {
-			case "tcp", "tls", "http", "https", "h3", "udp", "stun", "dns-udp", "dns-tcp", "dns-system":
+			case "tcp", "tls", "http", "https", "h3", "udp", "stun", "dns-udp", "dns-tcp", "dns-system", "webrtc":
 			default:
 				http.Error(w, "unsupported kind", 400)
 				return
@@ -252,6 +294,12 @@ func (s *Server) Handler() http.Handler {
 			}
 			writeJSON(w, rows)
 			return
+		}
+		if len(parts) == 5 && parts[3] == "webrtc" && r.Method == "GET" {
+			if t, ok := sess.Tickets[parts[4]]; ok && t.Kind == "webrtc" {
+				writeJSON(w, s.rtc.status(parts[4]))
+				return
+			}
 		}
 		http.NotFound(w, r)
 	})

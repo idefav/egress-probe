@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -71,7 +72,9 @@ func ProbeUDP(ctx context.Context, profile Profile, ticket Ticket, dial DialPack
 	defer stop()
 	deadline, _ := ctx.Deadline()
 	c.SetDeadline(deadline)
-	m := Message{ID: ticket.ID, Nonce: ticket.Nonce, Padding: string(make([]byte, 1024))}
+	// JSON escapes NUL bytes as six-byte sequences. Printable padding keeps
+	// the authenticated request below the IPv6 minimum MTU after IP/UDP headers.
+	m := Message{ID: ticket.ID, Nonce: ticket.Nonce, Padding: strings.Repeat("x", 1024)}
 	for attempt := 0; attempt < 2; attempt++ {
 		b, _ := json.Marshal(m)
 		if _, err = c.WriteTo(b, addr); err != nil {
