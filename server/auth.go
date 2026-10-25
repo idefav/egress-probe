@@ -208,15 +208,7 @@ func (a *Auth) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	if err = os.Rename(f.Name(), a.path); err != nil {
-		return err
-	}
-	d, err := os.Open(filepath.Dir(a.path))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return replaceAuthFile(f.Name(), a.path)
 }
 func (a *Auth) signCSR(csr *x509.CertificateRequest, id string, server bool) (string, *x509.Certificate, error) {
 	now := time.Now().UTC()

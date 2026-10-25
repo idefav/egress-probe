@@ -15,8 +15,17 @@ jobs:
           go-version-file: go.mod
       - run: go test -race ./...
       - run: go vet ./...
+  windows-auth:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify pairing persistence and revocation on Windows
+        run: go test ./server -run 'TestPairingAtomicRetryAndPersistence|TestRealMutualTLSRevocationAndLegacyRejection|TestRenewalOverlapAndRetry|TestDeviceCannotAccessAnotherSessionAndRevocationCancelsTickets' -count=1
   build:
-    needs: test
+    needs: [test, windows-auth]
     runs-on: ubuntu-latest
     strategy:
       matrix:
