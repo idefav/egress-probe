@@ -1,0 +1,70 @@
+name: Test and build observer
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./...
+      - run: go vet ./...
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build installation archive
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist
+          go build -trimpath -o dist/egress-probe-server ./cmd/egress-probe-server
+          cp deploy/egress-probe.service README.md dist/
+          cd dist
+          sha256sum egress-probe-server > SHA256SUMS
+          tar czf ../egress-probe-linux-${GOARCH}.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: egress-probe-linux-${{ matrix.arch }}
+          path: egress-probe-linux-*.tar.gz
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: egress-probe-linux-*
+          merge-multiple: true
+          path: dist
+      - name: Publish verified archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          test -s egress-probe-linux-amd64.tar.gz
+          test -s egress-probe-linux-arm64.tar.gz
+          sha256sum *.tar.gz > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          gh release create "$RELEASE_TAG" --verify-tag --prerelease --latest=false \
+            --title "$RELEASE_TAG" --notes 'Private IPv4 multi-protocol observer preview. See README for deployment and evidence boundaries.' \
+            *.tar.gz SHA256SUMS
