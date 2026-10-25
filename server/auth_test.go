@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -110,7 +111,9 @@ func TestPairingAtomicRetryAndPersistence(t *testing.T) {
 		t.Fatal("persisted pairing secret")
 	}
 	info, _ := os.Stat(filepath.Join(dir, "device-auth.json"))
-	if info.Mode().Perm() != 0600 {
+	// The deployed Linux service requires POSIX 0600. Windows SDK fixtures
+	// exercise persistence, but os.FileMode cannot describe Windows ACLs.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Fatal("state permissions")
 	}
 	a, err = OpenAuth(dir, profile)
